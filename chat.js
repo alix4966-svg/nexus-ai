@@ -1,6 +1,19 @@
 // api/chat.js
-// دالة Vercel Serverless — تستقبل الرسائل من الواجهة وترسلها إلى Groq API
+// دالة Vercel Serverless — تستقبل الرسائل (نص/صور/ملفات) من الواجهة
+// وترسلها إلى Groq API باستخدام الموديل اللي يختاره المستخدم من الإعدادات،
 // وتُعيد بث (stream) الرد لحظة بلحظة إلى المتصفح.
+
+const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
+
+// قائمة بسيطة للحماية: تأكد إن اسم الموديل نص معقول (يمنع حقن قيم غريبة بالطلب)
+function sanitizeModel(model) {
+  if (typeof model !== 'string') return DEFAULT_MODEL;
+  const trimmed = model.trim();
+  if (!trimmed || trimmed.length > 100 || !/^[a-zA-Z0-9._\-\/]+$/.test(trimmed)) {
+    return DEFAULT_MODEL;
+  }
+  return trimmed;
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -14,11 +27,13 @@ export default async function handler(req, res) {
     return;
   }
 
-  const { messages } = req.body || {};
+  const { messages, model } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     res.status(400).send('لا توجد رسائل صالحة في الطلب.');
     return;
   }
+
+  const chosenModel = sanitizeModel(model);
 
   try {
     const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -28,7 +43,7 @@ export default async function handler(req, res) {
         'Authorization': `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: 'openai/gpt-oss-120b',
+        model: chosenModel,
         messages,
         stream: true,
         temperature: 0.7,
@@ -38,6 +53,13 @@ export default async function handler(req, res) {
 
     if (!groqRes.ok || !groqRes.body) {
       const errText = await groqRes.text();
+      // إذا الموديل غير موجود عند Groq، نرجّع رسالة عربية واضحة بدل خطأ تقني غامض
+      if (groqRes.status === 404 || /model/i.test(errText)) {
+        res.status(groqRes.status).send(
+          `تعذّر استخدام الموديل "${chosenModel}". تأكد إن اسمه مطابق تمامًا لاسم موديل متوفر عند Groq (من ⚙️ الإعدادات). التفاصيل: ${errText}`
+        );
+        return;
+      }
       res.status(groqRes.status).send(errText || 'فشل الاتصال بـ Groq API');
       return;
     }
